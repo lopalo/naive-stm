@@ -1,3 +1,4 @@
+use crate::{VarId, Var};
 use std::{cell::RefCell, collections::BTreeMap};
 
 //TODO: use parking_lot::Mutex;
@@ -7,25 +8,24 @@ pub type Result<T = (), E = Error> = std::result::Result<T, E>;
 
 pub struct Error;
 
-//TODO: global static private atomic counter for this type;
-struct TxId;
-
-enum TrackedVar {
-    Buffered,
-    Flushed(Box<dyn TxVarGuard>),
+enum TxVar {
+    /// `TrackedVar` is moved into `TxRef`
+    InUse,
+    /// `TxRef` has been dropped, and it flushed `TrackedVar` back to a transaction
+    Pending(Box<dyn TrackedVar>),
 }
 
 pub struct Tx {
-    tracked_vars: RefCell<BTreeMap<TxId, TrackedVar>>,
+    vars: RefCell<BTreeMap<VarId, TxVar>>,
 }
 
 impl Tx {
-    // TODO: must return error if var is in tracked_vars and in Buffered state.
+    // TODO: must return error if var is in `self.vars` and in Buffered state.
     // TODO: Use Box<Any>::downcast
-    fn track<'tx, 'var: 'tx, V: TxVar>(
+    fn track<'tx, 'var: 'tx, V: Var>(
         &'tx self,
         var: &'var V,
-    ) -> Result<TxRef<'tx, V::Guard>> {
+    ) -> Result<TxRef<'tx, V::TrackedVar>> {
         todo!()
     }
 
@@ -34,30 +34,20 @@ impl Tx {
     }
 }
 
-// Must be a private trait
-trait TxVar {
-    type Guard: TxVarGuard;
-
-    fn tx_id(&self) -> TxId;
-
-    // TODO: remembers the original version at this point
-    fn guard(&self) -> &Self::Guard;
-}
-
 // TODO: must track original version
-trait TxVarGuard {
-    fn lock(&self) -> Box<dyn TxVarLock>;
+pub(crate) trait TrackedVar {
+    fn lock(&self) -> Box<dyn TrackedVarLock>;
 }
 
-trait TxVarLock {
+trait TrackedVarLock {
     fn can_commit(&self) -> bool;
 
     fn commit(&self);
 }
 
-//TODO: `T` must be concrete TxVarGuard
+//TODO: `T` must be concrete TrackedVar
 //TODO: implement Deref(Mut)
-//TODO: implement Drop that flushes TxVarGuard back to the `tx` as a trait object
+//TODO: implement Drop that flushes TrackedVar back to the `tx` as a trait object
 struct TxRef<'tx, T: 'tx> {
     tx: &'tx Tx,
     var: Box<T>,

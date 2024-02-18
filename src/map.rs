@@ -1,3 +1,2 @@
-
-//TODO: implement TxVar as a BTreeMap
-struct TxMap;
+//TODO: implement Var as a BTreeMap
+struct TMap;

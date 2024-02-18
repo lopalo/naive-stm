@@ -3,17 +3,28 @@ mod deque;
 mod map;
 mod transaction;
 
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
+use std::sync::atomic::{AtomicUsize, Ordering};
+use transaction::TrackedVar;
+
+struct VarId {
+    id: usize,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+impl VarId {
+    fn new() -> Self {
+        static CURRENT_ID: AtomicUsize = AtomicUsize::new(0);
+        Self {
+            id: CURRENT_ID.fetch_add(1, Ordering::SeqCst),
+        }
     }
+}
+
+// Must be a private trait
+trait Var {
+    type TrackedVar: TrackedVar;
+
+    fn var_id(&self) -> VarId;
+
+    // TODO: remembers the original version at this point
+    fn tracked_var(&self) -> &Self::TrackedVar;
 }
