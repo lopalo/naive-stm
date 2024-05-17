@@ -1,16 +1,27 @@
-mod cell;
-mod deque;
-mod map;
+pub mod cell;
+pub mod deque;
+pub mod map;
 mod transaction;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use transaction::TrackedVar;
+use transaction::TxVar;
 
-struct VarId {
+pub use transaction::Tx;
+
+pub type Result<T = (), E = Error> = std::result::Result<T, E>;
+
+#[derive(Debug)]
+pub enum Error {
+    TransactionVariableIsInUse,
+    TooManyTransactionRetryAttempts
+}
+
+#[derive(Clone, Copy)]
+struct StmVarId {
     id: usize,
 }
 
-impl VarId {
+impl StmVarId {
     fn new() -> Self {
         static CURRENT_ID: AtomicUsize = AtomicUsize::new(0);
         Self {
@@ -19,12 +30,26 @@ impl VarId {
     }
 }
 
-// Must be a private trait
-trait Var {
-    type TrackedVar: TrackedVar;
+/// Shared transaction variable
+trait StmVar {
+    type TxVar: TxVar;
 
-    fn var_id(&self) -> VarId;
+    fn var_id(&self) -> StmVarId;
 
-    // TODO: remembers the original version at this point
-    fn tracked_var(&self) -> &Self::TrackedVar;
+    /// Implementation must remember the original version of a variable at this point
+    fn tx_var(&self) -> Self::TxVar;
 }
+
+//TODO: use parking_lot::Mutex or RwLock;
+//TODO: use rclite::Arc;
+type SharedMutex<T> = std::sync::Arc<std::sync::Mutex<T>>;
+
+fn shared_mutex<T>(value: T) -> SharedMutex<T> {
+    std::sync::Arc::new(std::sync::Mutex::new(value))
+}
+
+fn clone_shared_mutex<T>(mutex: &SharedMutex<T>) -> SharedMutex<T> {
+    std::sync::Arc::clone(mutex)
+}
+
+type MutexGuard<'a, T> = std::sync::MutexGuard<'a, T>;
