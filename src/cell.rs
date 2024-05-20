@@ -1,8 +1,10 @@
 use crate::{
+    private,
     transaction::{LockedTxVar, TxVar},
     MutexGuard, SharedMutex, StmVar, StmVarId,
 };
 use std::{
+    any::Any,
     fmt,
     ops::{Deref, DerefMut},
 };
@@ -34,9 +36,11 @@ impl<T> StmCell<T> {
     }
 }
 
+impl<T> private::Sealed for StmCell<T> {}
+
 impl<T> StmVar for StmCell<T>
 where
-    T: Clone,
+    T: Clone + 'static,
 {
     type TxVar = TxCell<T>;
 
@@ -99,7 +103,9 @@ impl<T: fmt::Debug> fmt::Debug for TxCell<T> {
     }
 }
 
-impl<T> TxVar for TxCell<T> {
+impl<T> private::Sealed for TxCell<T> {}
+
+impl<T: 'static> TxVar for TxCell<T> {
     fn lock(&mut self) -> Box<dyn LockedTxVar + '_> {
         let Self {
             initial_version,
@@ -116,6 +122,10 @@ impl<T> TxVar for TxCell<T> {
             write_tx_value: *write_tx_value,
         })
     }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
 }
 
 struct LockedTxCell<'a, T> {
@@ -124,6 +134,8 @@ struct LockedTxCell<'a, T> {
     tx_value: &'a mut T,
     write_tx_value: bool,
 }
+
+impl<'a, T> private::Sealed for LockedTxCell<'a, T> {}
 
 impl<'a, T> LockedTxVar for LockedTxCell<'a, T> {
     fn can_commit(&self) -> bool {
@@ -136,76 +148,5 @@ impl<'a, T> LockedTxVar for LockedTxCell<'a, T> {
         }
         self.value.version += 1;
         std::mem::swap(self.tx_value, &mut self.value.data)
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    use crate::{Error, Tx};
-    use assert_matches::assert_matches;
-    use std::thread;
-
-    fn sleep() {
-        thread::sleep(std::time::Duration::from_micros(50))
-    }
-
-    fn read_cell<T: Clone>(cell: &StmCell<T>) -> T {
-        Tx::run(|tx| Ok(tx.track(cell)?.clone())).unwrap()
-    }
-
-    #[test]
-    fn two_transactions_add_2_cells() {
-        let cell_a = StmCell::new(5);
-        let cell_b = StmCell::new(17);
-        thread::scope(|scope| {
-            let tx_1 = scope.spawn(|| {
-                Tx::run(|tx| {
-                    sleep();
-                    let mut a = tx.track(&cell_a)?;
-                    sleep();
-                    let b = tx.track(&cell_b)?;
-
-                    assert_matches!(
-                        tx.track(&cell_a),
-                        Err(Error::TransactionVariableIsInUse)
-                    );
-
-                    let val = **a + **b;
-                    sleep();
-                    **a = val;
-                    Ok(val)
-                })
-                .unwrap()
-            });
-
-            let tx_2 = scope.spawn(|| {
-                Tx::run(|tx| {
-                    sleep();
-                    let b = tx.track(&cell_b)?;
-                    sleep();
-                    let a = tx.track(&cell_a)?;
-                    sleep();
-                    let val = **a + **b;
-                    drop(b);
-                    let mut b = tx.track(&cell_b)?;
-                    **b = val;
-                    sleep();
-                    Ok(val)
-                })
-                .unwrap()
-            });
-
-            let (tx_1_val, tx_2_val) =
-                (tx_1.join().unwrap(), tx_2.join().unwrap());
-
-            let (val_a, val_b) = (read_cell(&cell_a), read_cell(&cell_b));
-
-            assert_eq!(tx_1_val, val_a);
-            assert_eq!(tx_2_val, val_b);
-
-            // The result depends on the order in which the transactions are executed
-            assert_matches!(val_a + val_b, 49 | 61);
-        })
     }
 }

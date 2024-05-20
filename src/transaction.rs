@@ -1,14 +1,15 @@
-use crate::{Error, Result, StmVar, StmVarId};
+use crate::{private, Error, Result, StmVar, StmVarId};
 use std::{
+    any::Any,
     cell::RefCell,
-    collections::BTreeMap,
+    collections::{btree_map::Entry, BTreeMap},
     fmt,
     ops::{Deref, DerefMut},
     time::Duration,
 };
 
 pub struct TxOptions {
-    pub retries: usize,
+    pub attempts: usize,
     pub retry_pause: Duration,
     pub pause_jitter: bool,
 }
@@ -16,7 +17,7 @@ pub struct TxOptions {
 impl Default for TxOptions {
     fn default() -> Self {
         Self {
-            retries: 10,
+            attempts: 10,
             retry_pause: Duration::ZERO,
             pause_jitter: false,
         }
@@ -40,19 +41,22 @@ enum CommitStatus {
 }
 
 impl Tx {
-    pub fn run<T, F>(f: F) -> Result<T>
+    pub fn run<F, T, E>(f: F) -> Result<T, E>
     where
-        F: Fn(&Tx) -> Result<T>,
+        F: FnMut(&Tx) -> Result<T, E>,
     {
         Self::run_with_options(&Default::default(), f)
     }
 
-    pub fn run_with_options<T, F>(options: &TxOptions, f: F) -> Result<T>
+    pub fn run_with_options<F, T, E>(
+        options: &TxOptions,
+        mut f: F,
+    ) -> Result<T, E>
     where
-        F: Fn(&Tx) -> Result<T>,
+        F: FnMut(&Tx) -> Result<T, E>,
     {
         //TODO: use all `TxOptions` fields
-        for _ in 0..options.retries {
+        for _ in 0..options.attempts {
             let tx = Self {
                 vars: RefCell::new(BTreeMap::new()),
             };
@@ -65,29 +69,81 @@ impl Tx {
         Err(Error::TooManyTransactionRetryAttempts)
     }
 
-    // TODO: must return error if var is in `self.vars` and in `InUse` state.
-    // TODO: Use Box<Any>::downcast
-    pub fn track<'tx, 'var: 'tx, V: StmVar>(
+    pub fn track<'tx, 'var, V: StmVar>(
         &'tx self,
         var: &'var V,
     ) -> Result<TxRef<'tx, V::TxVar>> {
-        todo!()
+        let var_id = var.var_id();
+        let tx_var = match self.vars.borrow_mut().entry(var_id) {
+            Entry::Vacant(entry) => {
+                entry.insert(TrackedVar::InUse);
+                Box::new(var.tx_var())
+            }
+            Entry::Occupied(mut entry) => {
+                match std::mem::replace(entry.get_mut(), TrackedVar::InUse) {
+                    TrackedVar::InUse => {
+                        return Err(Error::TransactionVariableIsInUse)
+                    }
+                    TrackedVar::Pending(tx_var) => tx_var
+                        .into_any()
+                        .downcast()
+                        .expect(
+                        "BUG: variable type must be uniquely identified by its ID",
+                    ),
+                }
+            }
+        };
+        Ok(TxRef {
+            tx: self,
+            var_id,
+            var: Some(tx_var),
+        })
     }
 
-    fn commit(self) -> CommitStatus {
-        todo!()
+    fn commit(mut self) -> CommitStatus {
+        // The variables will be locked in the ascending order of their IDs.
+        let locked_vars: Vec<_> = self
+            .vars
+            .get_mut()
+            .values_mut()
+            .map(|tracked_var| {
+                let TrackedVar::Pending(tx_var) = tracked_var else {
+                    panic!("BUG: there must be no `TxRef` around for this transaction");
+                };
+                tx_var.lock()
+            })
+            .collect();
+        for var in &locked_vars {
+            if !var.can_commit() {
+                return CommitStatus::Fail;
+            }
+        }
+        for mut var in locked_vars {
+            var.commit()
+        }
+        CommitStatus::Success
+    }
+
+    pub fn abort<T>() -> Result<T, ()> {
+        Self::abort_with(())
+    }
+
+    pub fn abort_with<T, E>(error: E) -> Result<T, E> {
+        Err(Error::TransactionAbort(error))
     }
 }
 
 /// Implementors must track the original version of variable's value
-pub(crate) trait TxVar {
+pub trait TxVar: private::Sealed + 'static {
     /// This method is called in the commit phase of a transaction.
     /// `LockedTxVar` is responsible for checking whether the variable's value
     /// has changed while the transaction was running.
     fn lock(&mut self) -> Box<dyn LockedTxVar + '_>;
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any>;
 }
 
-pub(crate) trait LockedTxVar {
+pub trait LockedTxVar: private::Sealed {
     /// Checks if the variable's value has changed since the first read
     fn can_commit(&self) -> bool;
 
@@ -96,27 +152,63 @@ pub(crate) trait LockedTxVar {
     fn commit(&mut self);
 }
 
-//TODO: implement Drop that flushes TxVar back to the `tx` as a trait object
-pub struct TxRef<'tx, T: 'tx> {
+pub struct TxRef<'tx, T>
+where
+    // Unfortunately, `Drop` impl requires this bound on the struct
+    T: TxVar,
+{
     tx: &'tx Tx,
-    var: Box<T>,
+    var_id: StmVarId,
+    var: Option<Box<T>>,
 }
 
-impl<T> Deref for TxRef<'_, T> {
+static NO_VAR_ERROR_MSG: &'static str =
+    "BUG: transaction variable must be present for entire lifetime";
+
+impl<T: TxVar> TxRef<'_, T> {
+    fn get_var(&self) -> &T {
+        self.var.as_deref().expect(NO_VAR_ERROR_MSG)
+    }
+
+    fn get_var_mut(&mut self) -> &mut T {
+        self.var.as_deref_mut().expect(NO_VAR_ERROR_MSG)
+    }
+}
+
+impl<'tx, T> Drop for TxRef<'tx, T>
+where
+    T: TxVar,
+{
+    fn drop(&mut self) {
+        let Self { tx, var_id, var } = self;
+        let tx_var_status = tx.vars.borrow_mut().insert(
+            *var_id,
+            TrackedVar::Pending(var.take().expect(NO_VAR_ERROR_MSG)),
+        );
+        let Some(TrackedVar::InUse) = tx_var_status else {
+            panic!("BUG: transaction has not been tracking the variable `{var_id:?}`")
+        };
+    }
+}
+
+impl<T: TxVar> Deref for TxRef<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        self.var.deref()
+        self.get_var()
     }
 }
 
-impl<T> DerefMut for TxRef<'_, T> {
+impl<T: TxVar> DerefMut for TxRef<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
-        self.var.deref_mut()
+        self.get_var_mut()
     }
 }
 
-impl<T: fmt::Debug> fmt::Debug for TxRef<'_, T> {
+impl<T> fmt::Debug for TxRef<'_, T>
+where
+    T: TxVar + fmt::Debug,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.var.fmt(f)
     }

@@ -8,16 +8,17 @@ use transaction::TxVar;
 
 pub use transaction::Tx;
 
-pub type Result<T = (), E = Error> = std::result::Result<T, E>;
+pub type Result<T = (), E = ()> = std::result::Result<T, Error<E>>;
 
 #[derive(Debug)]
-pub enum Error {
+pub enum Error<E = ()> {
     TransactionVariableIsInUse,
-    TooManyTransactionRetryAttempts
+    TooManyTransactionRetryAttempts,
+    TransactionAbort(E),
 }
 
-#[derive(Clone, Copy)]
-struct StmVarId {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct StmVarId {
     id: usize,
 }
 
@@ -30,8 +31,8 @@ impl StmVarId {
     }
 }
 
-/// Shared transaction variable
-trait StmVar {
+/// A variable to be shared across multiple transactions
+pub trait StmVar: private::Sealed {
     type TxVar: TxVar;
 
     fn var_id(&self) -> StmVarId;
@@ -53,3 +54,7 @@ fn clone_shared_mutex<T>(mutex: &SharedMutex<T>) -> SharedMutex<T> {
 }
 
 type MutexGuard<'a, T> = std::sync::MutexGuard<'a, T>;
+
+mod private {
+    pub trait Sealed {}
+}
