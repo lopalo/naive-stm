@@ -1,5 +1,5 @@
 use assert_matches::assert_matches;
-use naive_stm::{cell::StmCell, Error, Tx};
+use naive_stm::{cell::StmCell, track, Error, Tx};
 use std::thread;
 
 fn sleep() {
@@ -29,7 +29,7 @@ fn two_transactions_add_2_cells() {
 
                 assert_matches!(
                     tx.track(&cell_a),
-                    Err(Error::TransactionVariableIsInUse)
+                    Err(Error::TransactionVariableIsInUse(_))
                 );
 
                 let val = **a + **b;
@@ -83,4 +83,35 @@ fn two_transactions_add_2_cells_100_times() {
     for _ in 0..100 {
         two_transactions_add_2_cells()
     }
+}
+
+#[test]
+fn triple_swap() {
+    let cell_a = StmCell::new("foo");
+    let cell_b = StmCell::new("bar");
+
+    thread::scope(|scope| {
+        let txs: Vec<_> = (0..3)
+            .map(|_| {
+                scope.spawn(|| {
+                    Tx::run(|tx| {
+                        track!(tx, cell_a, cell_b);
+                        let ref_a: &mut &str = &mut cell_a;
+                        let ref_b: &mut &str = &mut cell_b;
+                        std::mem::swap(ref_a, ref_b);
+                        Ok(())
+                    })
+                    .unwrap()
+                })
+            })
+            .collect();
+        for tx in txs {
+            tx.join().unwrap();
+        }
+    });
+
+    let (val_a, val_b) = (read_cell(&cell_a), read_cell(&cell_b));
+
+    assert_eq!("bar", val_a);
+    assert_eq!("foo", val_b);
 }

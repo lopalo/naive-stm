@@ -1,10 +1,12 @@
 use crate::{private, Error, Result, StmVar, StmVarId};
+use rand::prelude::*;
 use std::{
     any::Any,
     cell::RefCell,
     collections::{btree_map::Entry, BTreeMap},
     fmt,
     ops::{Deref, DerefMut},
+    thread,
     time::Duration,
 };
 
@@ -55,8 +57,22 @@ impl Tx {
     where
         F: FnMut(&Tx) -> Result<T, E>,
     {
-        //TODO: use all `TxOptions` fields
-        for _ in 0..options.attempts {
+        let TxOptions {
+            attempts,
+            retry_pause,
+            pause_jitter,
+        } = *options;
+        let mut rng = rand::thread_rng();
+
+        for attempt in 0..attempts {
+            if attempt > 0 {
+                let mut pause = retry_pause;
+                if pause_jitter {
+                    pause = pause.mul_f32(rng.gen())
+                }
+                thread::sleep(pause);
+            }
+
             let tx = Self {
                 vars: RefCell::new(BTreeMap::new()),
             };
@@ -66,7 +82,8 @@ impl Tx {
                 CommitStatus::Fail => (),
             }
         }
-        Err(Error::TooManyTransactionRetryAttempts)
+
+        Err(Error::TooManyTransactionRetryAttempts { attempts })
     }
 
     pub fn track<'tx, 'var, V: StmVar>(
@@ -82,7 +99,7 @@ impl Tx {
             Entry::Occupied(mut entry) => {
                 match std::mem::replace(entry.get_mut(), TrackedVar::InUse) {
                     TrackedVar::InUse => {
-                        return Err(Error::TransactionVariableIsInUse)
+                        return Err(Error::TransactionVariableIsInUse(var_id))
                     }
                     TrackedVar::Pending(tx_var) => tx_var
                         .into_any()
@@ -214,4 +231,9 @@ where
     }
 }
 
-//TODO: macro track!(tx, var1, var2) => {let var1 = tx.track(var1)?; let var2 = tx.track(var2)?}
+#[macro_export]
+macro_rules! track {
+    ($tx:ident, $($stm_var:ident),+) => {
+        $(let mut $stm_var = $tx.track(&$stm_var)?;)+
+    };
+}

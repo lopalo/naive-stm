@@ -1,2 +1,2 @@
-//TODO: implement Var as a BTreeMap
+//TODO: implement StmVar as a BTreeMap
 struct StmMap;

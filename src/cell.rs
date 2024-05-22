@@ -1,7 +1,7 @@
 use crate::{
     private,
     transaction::{LockedTxVar, TxVar},
-    MutexGuard, SharedMutex, StmVar, StmVarId,
+    LockGuard, SharedRwLock, StmVar, StmVarId,
 };
 use std::{
     any::Any,
@@ -9,9 +9,9 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-type SharedValue<T> = SharedMutex<VersionedValue<T>>;
+type SharedValue<T> = SharedRwLock<VersionedValue<T>>;
 
-type LockedValue<'a, T> = MutexGuard<'a, VersionedValue<T>>;
+type LockedValue<'a, T> = LockGuard<'a, VersionedValue<T>>;
 
 #[derive(Clone)]
 pub struct StmCell<T> {
@@ -28,7 +28,7 @@ impl<T> StmCell<T> {
     pub fn new(value: T) -> Self {
         Self {
             var_id: StmVarId::new(),
-            value: crate::shared_mutex(VersionedValue {
+            value: crate::shared_lock(VersionedValue {
                 version: 0,
                 data: value,
             }),
@@ -49,16 +49,13 @@ where
     }
 
     fn tx_var(&self) -> Self::TxVar {
-        let ver_value = self
-            .value
-            .lock()
-            .expect("BUG: transaction commit phase must not poison a mutex");
+        let ver_value = self.value.read();
         let initial_version = ver_value.version;
         let tx_value = ver_value.data.clone();
         drop(ver_value);
         TxCell {
             initial_version,
-            value: crate::clone_shared_mutex(&self.value),
+            value: crate::clone_shared_lock(&self.value),
             tx_value,
             write_tx_value: false,
         }
@@ -113,13 +110,15 @@ impl<T: 'static> TxVar for TxCell<T> {
             tx_value,
             write_tx_value,
         } = self;
+        let value = if *write_tx_value {
+            LockGuard::Write(value.write())
+        } else {
+            LockGuard::Read(value.read())
+        };
         Box::new(LockedTxCell {
             initial_version: *initial_version,
-            value: value.lock().expect(
-                "BUG: transaction commit phase must not poison a mutex",
-            ),
+            value,
             tx_value,
-            write_tx_value: *write_tx_value,
         })
     }
 
@@ -132,21 +131,25 @@ struct LockedTxCell<'a, T> {
     initial_version: usize,
     value: LockedValue<'a, T>,
     tx_value: &'a mut T,
-    write_tx_value: bool,
 }
 
 impl<'a, T> private::Sealed for LockedTxCell<'a, T> {}
 
 impl<'a, T> LockedTxVar for LockedTxCell<'a, T> {
     fn can_commit(&self) -> bool {
-        self.initial_version == self.value.version
+        let current_version = match &self.value {
+            LockGuard::Read(value) => value.version,
+            LockGuard::Write(value) => value.version,
+        };
+        self.initial_version == current_version
     }
 
     fn commit(&mut self) {
-        if !self.write_tx_value {
-            return;
-        }
-        self.value.version += 1;
-        std::mem::swap(self.tx_value, &mut self.value.data)
+        let value = match &mut self.value {
+            LockGuard::Read(_) => return,
+            LockGuard::Write(value) => value,
+        };
+        value.version += 1;
+        std::mem::swap(self.tx_value, &mut value.data)
     }
 }

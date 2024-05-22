@@ -3,7 +3,10 @@ pub mod deque;
 pub mod map;
 mod transaction;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{
+    fmt,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 use transaction::TxVar;
 
 pub use transaction::Tx;
@@ -12,9 +15,28 @@ pub type Result<T = (), E = ()> = std::result::Result<T, Error<E>>;
 
 #[derive(Debug)]
 pub enum Error<E = ()> {
-    TransactionVariableIsInUse,
-    TooManyTransactionRetryAttempts,
+    TransactionVariableIsInUse(StmVarId),
+    TooManyTransactionRetryAttempts { attempts: usize },
     TransactionAbort(E),
+}
+
+impl<E> fmt::Display for Error<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TransactionVariableIsInUse(var_id) => write!(
+                f,
+                "Transaction is already tracking the variable `{var_id:?}`. \
+                The previous `TxRef` handle for this variable must be dropped \
+                before calling `Tx.track` on it again."
+            ),
+            Self::TooManyTransactionRetryAttempts { attempts } => {
+                write!(f, "The maximum number ({attempts}) of attempts for the transaction has been reached")
+            }
+            Self::TransactionAbort(_) => {
+                write!(f, "Transaction was explicitly aborted")
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -41,19 +63,20 @@ pub trait StmVar: private::Sealed {
     fn tx_var(&self) -> Self::TxVar;
 }
 
-//TODO: use parking_lot::Mutex or RwLock;
-//TODO: use rclite::Arc;
-type SharedMutex<T> = std::sync::Arc<std::sync::Mutex<T>>;
+type SharedRwLock<T> = rclite::Arc<parking_lot::RwLock<T>>;
 
-fn shared_mutex<T>(value: T) -> SharedMutex<T> {
-    std::sync::Arc::new(std::sync::Mutex::new(value))
+fn shared_lock<T>(value: T) -> SharedRwLock<T> {
+    rclite::Arc::new(parking_lot::RwLock::new(value))
 }
 
-fn clone_shared_mutex<T>(mutex: &SharedMutex<T>) -> SharedMutex<T> {
-    std::sync::Arc::clone(mutex)
+fn clone_shared_lock<T>(lock: &SharedRwLock<T>) -> SharedRwLock<T> {
+    rclite::Arc::clone(lock)
 }
 
-type MutexGuard<'a, T> = std::sync::MutexGuard<'a, T>;
+enum LockGuard<'a, T> {
+    Read(parking_lot::RwLockReadGuard<'a, T>),
+    Write(parking_lot::RwLockWriteGuard<'a, T>),
+}
 
 mod private {
     pub trait Sealed {}
