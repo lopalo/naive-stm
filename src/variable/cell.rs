@@ -1,42 +1,30 @@
 use crate::{
-    private,
     transaction::{LockedTxVar, TxVar},
-    LockGuard, SharedRwLock, StmVar, StmVarId,
+    variable::{
+        self, LockGuard, LockedVersionedValue, SharedVersionedValue, StmVar,
+        StmVarId, Version, VersionedValue,
+    },
 };
 use std::{
-    any::Any,
+    any::{self, Any},
     fmt,
     ops::{Deref, DerefMut},
 };
 
-type SharedValue<T> = SharedRwLock<VersionedValue<T>>;
-
-type LockedValue<'a, T> = LockGuard<'a, VersionedValue<T>>;
-
 #[derive(Clone)]
 pub struct StmCell<T> {
     var_id: StmVarId,
-    value: SharedValue<T>,
-}
-
-struct VersionedValue<T> {
-    version: usize,
-    data: T,
+    value: SharedVersionedValue<T>,
 }
 
 impl<T> StmCell<T> {
     pub fn new(value: T) -> Self {
         Self {
             var_id: StmVarId::new(),
-            value: crate::shared_lock(VersionedValue {
-                version: 0,
-                data: value,
-            }),
+            value: VersionedValue::new_in_shared_lock(value),
         }
     }
 }
-
-impl<T> private::Sealed for StmCell<T> {}
 
 impl<T> StmVar for StmCell<T>
 where
@@ -50,21 +38,27 @@ where
 
     fn tx_var(&self) -> Self::TxVar {
         let ver_value = self.value.read();
-        let initial_version = ver_value.version;
+        let initial_version = ver_value.version.clone();
         let tx_value = ver_value.data.clone();
         drop(ver_value);
         TxCell {
             initial_version,
-            value: crate::clone_shared_lock(&self.value),
+            value: variable::clone_shared_lock(&self.value),
             tx_value,
             write_tx_value: false,
         }
     }
 }
 
+impl<T> fmt::Debug for StmCell<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "StmCell<{}>({:?})", any::type_name::<T>(), self.var_id)
+    }
+}
+
 pub struct TxCell<T> {
-    initial_version: usize,
-    value: SharedValue<T>,
+    initial_version: Version,
+    value: SharedVersionedValue<T>,
     tx_value: T,
     write_tx_value: bool,
 }
@@ -94,13 +88,11 @@ impl<T> DerefMut for TxCell<T> {
     }
 }
 
-impl<T: fmt::Debug> fmt::Debug for TxCell<T> {
+impl<T> fmt::Debug for TxCell<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "TxCell({:?})", self.tx_value)
+        write!(f, "TxCell<{}>", any::type_name::<T>())
     }
 }
-
-impl<T> private::Sealed for TxCell<T> {}
 
 impl<T: 'static> TxVar for TxCell<T> {
     fn lock(&mut self) -> Box<dyn LockedTxVar + '_> {
@@ -116,7 +108,7 @@ impl<T: 'static> TxVar for TxCell<T> {
             LockGuard::Read(value.read())
         };
         Box::new(LockedTxCell {
-            initial_version: *initial_version,
+            initial_version: initial_version.clone(),
             value,
             tx_value,
         })
@@ -128,20 +120,14 @@ impl<T: 'static> TxVar for TxCell<T> {
 }
 
 struct LockedTxCell<'a, T> {
-    initial_version: usize,
-    value: LockedValue<'a, T>,
+    initial_version: Version,
+    value: LockedVersionedValue<'a, T>,
     tx_value: &'a mut T,
 }
 
-impl<'a, T> private::Sealed for LockedTxCell<'a, T> {}
-
 impl<'a, T> LockedTxVar for LockedTxCell<'a, T> {
     fn can_commit(&self) -> bool {
-        let current_version = match &self.value {
-            LockGuard::Read(value) => value.version,
-            LockGuard::Write(value) => value.version,
-        };
-        self.initial_version == current_version
+        &self.initial_version == self.value.current_version()
     }
 
     fn commit(&mut self) {
@@ -149,7 +135,7 @@ impl<'a, T> LockedTxVar for LockedTxCell<'a, T> {
             LockGuard::Read(_) => return,
             LockGuard::Write(value) => value,
         };
-        value.version += 1;
+        value.version.increment();
         std::mem::swap(self.tx_value, &mut value.data)
     }
 }

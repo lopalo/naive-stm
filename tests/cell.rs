@@ -1,5 +1,5 @@
 use assert_matches::assert_matches;
-use naive_stm::{cell::StmCell, track, Error, Tx};
+use naive_stm::{track, Error, StmCell, Tx};
 use std::thread;
 
 fn sleep() {
@@ -105,6 +105,7 @@ fn triple_swap() {
                 })
             })
             .collect();
+
         for tx in txs {
             tx.join().unwrap();
         }

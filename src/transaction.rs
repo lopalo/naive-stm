@@ -1,4 +1,4 @@
-use crate::{private, Error, Result, StmVar, StmVarId};
+use crate::{variable::StmVar, Error, Result, StmVarId};
 use rand::prelude::*;
 use std::{
     any::Any,
@@ -76,9 +76,13 @@ impl Tx {
             let tx = Self {
                 vars: RefCell::new(BTreeMap::new()),
             };
-            let res = f(&tx)?;
+            let result = f(&tx);
+            if let Err(Error::ConcurrentUpdate) = result {
+                continue;
+            }
+            let output = result?;
             match tx.commit() {
-                CommitStatus::Success => return Ok(res),
+                CommitStatus::Success => return Ok(output),
                 CommitStatus::Fail => (),
             }
         }
@@ -86,9 +90,9 @@ impl Tx {
         Err(Error::TooManyTransactionRetryAttempts { attempts })
     }
 
-    pub fn track<'tx, 'var, V: StmVar>(
+    pub fn track<'tx, V: StmVar>(
         &'tx self,
-        var: &'var V,
+        var: &V,
     ) -> Result<TxRef<'tx, V::TxVar>> {
         let var_id = var.var_id();
         let tx_var = match self.vars.borrow_mut().entry(var_id) {
@@ -141,17 +145,17 @@ impl Tx {
         CommitStatus::Success
     }
 
-    pub fn abort<T>() -> Result<T, ()> {
+    pub fn abort() -> Result<(), ()> {
         Self::abort_with(())
     }
 
-    pub fn abort_with<T, E>(error: E) -> Result<T, E> {
+    pub fn abort_with<E>(error: E) -> Result<(), E> {
         Err(Error::TransactionAbort(error))
     }
 }
 
 /// Implementors must track the original version of variable's value
-pub trait TxVar: private::Sealed + 'static {
+pub trait TxVar: 'static {
     /// This method is called in the commit phase of a transaction.
     /// `LockedTxVar` is responsible for checking whether the variable's value
     /// has changed while the transaction was running.
@@ -160,7 +164,7 @@ pub trait TxVar: private::Sealed + 'static {
     fn into_any(self: Box<Self>) -> Box<dyn Any>;
 }
 
-pub trait LockedTxVar: private::Sealed {
+pub trait LockedTxVar {
     /// Checks if the variable's value has changed since the first read
     fn can_commit(&self) -> bool;
 
@@ -179,7 +183,7 @@ where
     var: Option<Box<T>>,
 }
 
-static NO_VAR_ERROR_MSG: &'static str =
+static NO_VAR_ERROR_MSG: &str =
     "BUG: transaction variable must be present for entire lifetime";
 
 impl<T: TxVar> TxRef<'_, T> {
@@ -192,10 +196,7 @@ impl<T: TxVar> TxRef<'_, T> {
     }
 }
 
-impl<'tx, T> Drop for TxRef<'tx, T>
-where
-    T: TxVar,
-{
+impl<'tx, T: TxVar> Drop for TxRef<'tx, T> {
     fn drop(&mut self) {
         let Self { tx, var_id, var } = self;
         let tx_var_status = tx.vars.borrow_mut().insert(
@@ -222,12 +223,9 @@ impl<T: TxVar> DerefMut for TxRef<'_, T> {
     }
 }
 
-impl<T> fmt::Debug for TxRef<'_, T>
-where
-    T: TxVar + fmt::Debug,
-{
+impl<T: TxVar + fmt::Debug> fmt::Debug for TxRef<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.var.fmt(f)
+        write!(f, "TxRef<{:?}>({:?})", self.get_var(), self.var_id)
     }
 }
 
