@@ -27,6 +27,21 @@ pub trait StmVar {
     fn tx_var(&self) -> Self::TxVar;
 }
 
+impl<T> StmVar for &T
+where
+    T: StmVar,
+{
+    type TxVar = T::TxVar;
+
+    fn var_id(&self) -> StmVarId {
+        T::var_id(self)
+    }
+
+    fn tx_var(&self) -> Self::TxVar {
+        T::tx_var(self)
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct Version(usize);
 
@@ -80,3 +95,17 @@ type ReadLockedVersionedValue<'a, T> =
 fn clone_shared_lock<T>(lock: &SharedRwLock<T>) -> SharedRwLock<T> {
     rclite::Arc::clone(lock)
 }
+
+macro_rules! impl_stm_var_eq {
+    ($($stm_var_ty:ident<$($ty_param:ident),*>),*)  => {$(
+        impl <$($ty_param),*> PartialEq for $stm_var_ty <$($ty_param),*>
+        where Self: StmVar
+        {
+            fn eq(&self, other: &Self) -> bool {
+                self.var_id() == other.var_id()
+            }
+        }
+    )*}
+}
+use crate::{StmCell, StmMap, StmQueue};
+impl_stm_var_eq! {StmCell<T>, StmQueue<T>, StmMap<K, V>}

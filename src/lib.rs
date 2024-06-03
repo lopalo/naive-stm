@@ -5,7 +5,11 @@ use std::fmt;
 use variable::StmVarId;
 
 pub use transaction::Tx;
-pub use variable::{cell::StmCell, map::StmMap, queue::StmQueue};
+pub use variable::{
+    cell::{StmCell, TxCell},
+    map::{StmMap, TxMap},
+    queue::{StmQueue, TxQueue},
+};
 
 pub type Result<T = (), E = ()> = std::result::Result<T, Error<E>>;
 

@@ -1,5 +1,5 @@
 use assert_matches::assert_matches;
-use naive_stm::{StmQueue, Tx};
+use naive_stm::{track, StmQueue, Tx};
 use rand::seq::SliceRandom;
 use std::{
     iter, thread,
@@ -8,8 +8,9 @@ use std::{
 
 fn drain_queue<T: Clone + 'static>(queue: &StmQueue<T>) -> Vec<T> {
     Tx::run(|tx| {
+        track! {tx, queue};
         let mut items = vec![];
-        while let Some(item) = tx.track(queue)?.pop()? {
+        while let Some(item) = queue.pop()? {
             items.push(item)
         }
         Ok(items)
