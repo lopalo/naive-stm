@@ -1,10 +1,12 @@
+//! Software transactional memory
+
 mod transaction;
 mod variable;
 
 use std::fmt;
 use variable::StmVarId;
 
-pub use transaction::Tx;
+pub use transaction::{Tx, TxOptions};
 pub use variable::{
     cell::{StmCell, TxCell},
     map::{StmMap, TxMap},
@@ -28,7 +30,7 @@ impl<E> fmt::Display for Error<E> {
                 f,
                 "Transaction is already tracking the STM variable `{var_id:?}`. \
                 The previous `TxRef` handle for this variable must be dropped \
-                before calling `Tx.track` on it again."
+                before calling `Tx::track` on it again."
             ),
             Self::ConcurrentUpdate => write!(
                 f,

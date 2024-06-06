@@ -11,6 +11,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
+/// Atomic single element container
 #[derive(Clone)]
 pub struct StmCell<T> {
     var_id: StmVarId,
@@ -56,6 +57,7 @@ impl<T> fmt::Debug for StmCell<T> {
     }
 }
 
+/// A handle for [`StmCell`] tracked by a transaction
 pub struct TxCell<T> {
     initial_version: Version,
     value: SharedVersionedValue<T>,
@@ -64,10 +66,12 @@ pub struct TxCell<T> {
 }
 
 impl<T> TxCell<T> {
+    /// Reference to the in-transaction value of the cell
     pub fn get(&self) -> &T {
         &self.tx_value
     }
 
+    /// Mutable reference to the in-transaction value of the cell
     pub fn get_mut(&mut self) -> &mut T {
         self.write_tx_value = true;
         &mut self.tx_value

@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_names)]
+
 use naive_stm::{
     track, Result, Tx, {StmMap, TxMap},
 };
@@ -72,7 +74,7 @@ fn maps_grouping() {
                     }
                     track! {tx, bucket, baz};
                     for key in &all_keys {
-                        if key.starts_with("c") {
+                        if key.starts_with('c') {
                             move_item(key, &mut bucket, &mut baz)?;
                         }
                     }
@@ -85,11 +87,11 @@ fn maps_grouping() {
             Tx::run(|tx| {
                 for bucket in buckets {
                     for key in &all_keys {
-                        if bucket != bar && key.starts_with("b") {
+                        if bucket != bar && key.starts_with('b') {
                             track! {tx, bucket, bar};
                             move_item(key, &mut bucket, &mut bar)?;
                         }
-                        if bucket != qux && key.starts_with("d") {
+                        if bucket != qux && key.starts_with('d') {
                             track! {tx, bucket, qux};
                             move_item(key, &mut bucket, &mut qux)?;
                         }
@@ -107,7 +109,7 @@ fn maps_grouping() {
                     }
                     track! {tx, bucket, foo};
                     for key in &all_keys {
-                        if key.starts_with("a") {
+                        if key.starts_with('a') {
                             move_item(key, &mut bucket, &mut foo)?;
                         }
                     }

@@ -15,6 +15,7 @@ use std::{
 
 type SharedVersionedDeque<T> = SharedVersionedValue<VecDeque<T>>;
 
+/// Atomic queue
 #[derive(Clone)]
 pub struct StmQueue<T> {
     var_id: StmVarId,
@@ -68,6 +69,7 @@ where
     }
 }
 
+/// A handle for [`StmQueue`] tracked by a transaction
 pub struct TxQueue<T> {
     initial_version: Version,
     queue: SharedVersionedDeque<T>,
@@ -79,10 +81,12 @@ impl<T> TxQueue<T>
 where
     T: Clone,
 {
+    /// Enqueue an element
     pub fn push(&mut self, item: T) {
         self.push_back_items.push_back(item)
     }
 
+    /// Dequeue an element
     pub fn pop(&mut self) -> Result<Option<T>> {
         let queue = self.read_queue()?;
         let item = queue.data.get(self.front_position).cloned();
@@ -93,6 +97,7 @@ where
         Ok(item.or_else(|| self.push_back_items.pop_front()))
     }
 
+    /// Get the next element to be dequeued without consuming it
     pub fn peek(&self) -> Result<Option<Cow<T>>> {
         let queue = self.read_queue()?;
         let item = queue.data.get(self.front_position).cloned().map(Cow::Owned);

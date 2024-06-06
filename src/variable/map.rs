@@ -15,6 +15,7 @@ use std::{
 
 type SharedVersionedMap<K, V> = SharedVersionedValue<BTreeMap<K, V>>;
 
+/// Atomic map sorted by key
 #[derive(Clone)]
 pub struct StmMap<K, V> {
     var_id: StmVarId,
@@ -70,6 +71,7 @@ where
     }
 }
 
+/// A handle for [`StmMap`] tracked by a transaction
 pub struct TxMap<K, V> {
     initial_version: Version,
     map: SharedVersionedMap<K, V>,
@@ -136,6 +138,7 @@ where
         Ok(self.read_map()?.data.contains_key(key))
     }
 
+    /// Returns the minimum key in the map. If result is `None`, then the map is empty.
     pub fn first_key(&self) -> Result<Option<Cow<K>>>
     where
         K: Clone,

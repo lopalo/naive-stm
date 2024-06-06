@@ -10,9 +10,14 @@ use std::{
     time::Duration,
 };
 
+/// Options to run a transaction with
 pub struct TxOptions {
+    /// How many times a transaction will be retried in case of concurrent updates
     pub attempts: usize,
+    /// A pause before the next attempt to complete a transaction
     pub retry_pause: Duration,
+    /// If `true`, the pause between transaction attempts will be random
+    /// value withing the range `0 .. retry_pause`
     pub pause_jitter: bool,
 }
 
@@ -27,12 +32,13 @@ impl Default for TxOptions {
 }
 
 enum TrackedVar {
-    /// `TxVar` is moved into `TxRef`
+    /// [`TxVar`] is moved into [`TxRef`]
     InUse,
-    /// `TxRef` has been dropped, and it flushed `TxVar` back to a transaction
+    /// [`TxRef`] has been dropped, and it flushed [`TxVar`] back to a transaction
     Pending(Box<dyn TxVar>),
 }
 
+/// Transaction executor
 pub struct Tx {
     vars: RefCell<BTreeMap<StmVarId, TrackedVar>>,
 }
@@ -43,6 +49,7 @@ enum CommitStatus {
 }
 
 impl Tx {
+    /// Run a new transaction which will be automatically retried in case of concurrent updates
     pub fn run<F, T, E>(f: F) -> Result<T, E>
     where
         F: FnMut(&Tx) -> Result<T, E>,
@@ -50,6 +57,7 @@ impl Tx {
         Self::run_with_options(&Default::default(), f)
     }
 
+    /// Like [`run`](#method.run) but with non-default options
     pub fn run_with_options<F, T, E>(
         options: &TxOptions,
         mut f: F,
@@ -90,6 +98,14 @@ impl Tx {
         Err(Error::TooManyTransactionRetryAttempts { attempts })
     }
 
+    /// Make the transaction track an STM variable for changes made within the current
+    /// transaction and for changes made by concurrently commited transactions.
+    ///
+    /// The method returns a handle that allows isolated read/write operations on the variable.
+    /// All the changes made to the same STM variable withing the same transaction are preserved
+    /// between the calls of `Tx::track`.
+    ///
+    /// Returns an error if there is another alive handle for the variable in the current transaction.
     pub fn track<'tx, V: StmVar>(
         &'tx self,
         var: &V,
@@ -145,10 +161,13 @@ impl Tx {
         CommitStatus::Success
     }
 
+    /// Abort current transaction and prevent it from futher retrying
     pub fn abort() -> Result<(), ()> {
         Self::abort_with(())
     }
 
+    /// Aborth transaction with the given error.
+    /// This method should be used for propagating custom errors out of a transaction.
     pub fn abort_with<E>(error: E) -> Result<(), E> {
         Err(Error::TransactionAbort(error))
     }
@@ -157,7 +176,7 @@ impl Tx {
 /// Implementors must track the original version of variable's value
 pub trait TxVar: 'static {
     /// This method is called in the commit phase of a transaction.
-    /// `LockedTxVar` is responsible for checking whether the variable's value
+    /// [`LockedTxVar`] is responsible for checking whether the variable's value
     /// has changed while the transaction was running.
     fn lock(&mut self) -> Box<dyn LockedTxVar + '_>;
 
@@ -173,6 +192,7 @@ pub trait LockedTxVar {
     fn commit(&mut self);
 }
 
+/// A wrapper for an STM variable that is tracked by a transaction.
 pub struct TxRef<'tx, T>
 where
     // Unfortunately, `Drop` impl requires this bound on the struct
@@ -229,6 +249,23 @@ impl<T: TxVar + fmt::Debug> fmt::Debug for TxRef<'_, T> {
     }
 }
 
+/// A helper to create tracked transaction variables from STM variables in the current block scope.
+///
+/// # Examples
+///
+/// ```
+/// use naive_stm::{Tx, StmCell, StmQueue, track};
+///
+/// let cell = StmCell::new(777);
+/// let queue = StmQueue::from_iter([23]);
+/// Tx::run(|tx| {
+///     track!(tx, cell, queue);
+///     *cell.get_mut() = queue.pop()?.unwrap();
+///     assert_eq!(23, *cell.get());
+///     Ok(())
+/// });
+///
+/// ```
 #[macro_export]
 macro_rules! track {
     ($tx:ident, $($stm_var:ident),+) => {
