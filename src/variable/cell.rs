@@ -76,6 +76,14 @@ impl<T> TxCell<T> {
         self.write_tx_value = true;
         &mut self.tx_value
     }
+
+    /// Takes the value out of the cell, leaving the default value of `T`
+    pub fn take(&mut self) -> T
+    where
+        T: Default,
+    {
+        std::mem::take(self.get_mut())
+    }
 }
 
 impl<T> Deref for TxCell<T> {

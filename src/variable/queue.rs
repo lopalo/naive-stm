@@ -69,6 +69,12 @@ where
     }
 }
 
+impl<T> fmt::Debug for StmQueue<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "StmQueue<{}>({:?})", any::type_name::<T>(), self.var_id)
+    }
+}
+
 /// A handle for [`StmQueue`] tracked by a transaction
 pub struct TxQueue<T> {
     initial_version: Version,
@@ -110,6 +116,10 @@ where
             return Ok(false);
         }
         Ok(self.push_back_items.is_empty())
+    }
+
+    pub fn iter(&self) -> Iter<'_, T> {
+        self.into_iter()
     }
 
     fn read_queue(&self) -> Result<ReadLockedVersionedValue<'_, VecDeque<T>>> {
@@ -175,5 +185,114 @@ impl<'a, T> LockedTxVar for LockedTxQueue<'a, T> {
             queue.data.pop_front();
         }
         queue.data.append(self.push_back_items)
+    }
+}
+
+impl<'a, T> IntoIterator for &'a TxQueue<T>
+where
+    T: Clone,
+{
+    type IntoIter = Iter<'a, T>;
+    type Item = <Self::IntoIter as Iterator>::Item;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Iter {
+            queue: self,
+            cursor: 0,
+        }
+    }
+}
+
+pub struct Iter<'a, T> {
+    queue: &'a TxQueue<T>,
+    cursor: usize,
+}
+
+impl<'a, T> Iterator for Iter<'a, T>
+where
+    T: Clone,
+{
+    type Item = Result<Cow<'a, T>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let Self {
+            queue:
+                TxQueue {
+                    front_position,
+                    push_back_items,
+                    ..
+                },
+            cursor,
+        } = self;
+        let mut position = *cursor + *front_position;
+        let queue = match self.queue.read_queue() {
+            Ok(queue) => queue,
+            Err(err) => return Some(Err(err)),
+        };
+        let queue_len = queue.data.len();
+        let item = queue.data.get(position).cloned().map(Cow::Owned);
+        drop(queue);
+        if position >= queue_len {
+            position -= queue_len;
+        }
+        let item =
+            item.or_else(|| push_back_items.get(position).map(Cow::Borrowed));
+        if item.is_some() {
+            *cursor += 1;
+        }
+        Ok(item).transpose()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn queue_operations() {
+        let q = StmQueue::from_iter([10, 20, 30, 40]);
+        assert!(
+            format!("{q:?}").starts_with("StmQueue<i32>(StmVarId(")
+        );
+
+        crate::Tx::run(|tx| {
+            crate::track! {tx, q};
+            assert!(!q.is_empty()?);
+            assert_eq!(q.peek()?, Some(Cow::Owned(10)));
+            assert_eq!(q.pop()?, Some(10));
+            assert_eq!(q.peek()?, Some(Cow::Owned(20)));
+            assert_eq!(q.pop()?, Some(20));
+            assert!(!q.is_empty()?);
+
+            q.push(777);
+            q.push(888);
+
+            assert_eq!(
+                q.iter().collect::<Result<Vec<_>>>()?,
+                vec![
+                    Cow::Owned(30),
+                    Cow::Owned(40),
+                    Cow::Borrowed(&777),
+                    Cow::Borrowed(&888)
+                ]
+            );
+
+            assert!(
+                format!("{q:?}").starts_with("TxRef<TxQueue<i32>>(StmVarId(")
+            );
+
+            q.pop()?;
+            q.pop()?;
+            assert!(!q.is_empty()?);
+
+            assert_eq!(q.peek()?, Some(Cow::Borrowed(&777)));
+            assert_eq!(q.pop()?, Some(777));
+            assert_eq!(q.peek()?, Some(Cow::Owned(888)));
+            assert_eq!(q.pop()?, Some(888));
+            assert!(q.is_empty()?);
+
+            Ok(())
+        })
+        .unwrap()
     }
 }

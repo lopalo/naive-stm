@@ -269,6 +269,9 @@ impl<T: TxVar + fmt::Debug> fmt::Debug for TxRef<'_, T> {
 #[macro_export]
 macro_rules! track {
     ($tx:ident, $($stm_var:ident),+) => {
-        $(let mut $stm_var = $tx.track(&$stm_var)?;)+
+        $(
+            #[allow(unused_mut)]
+            let mut $stm_var = $tx.track(&$stm_var)?;
+        )+
     };
 }

@@ -11,6 +11,7 @@ use std::{
     borrow::{Borrow, Cow},
     collections::{BTreeMap, BTreeSet},
     fmt,
+    ops::Bound,
 };
 
 type SharedVersionedMap<K, V> = SharedVersionedValue<BTreeMap<K, V>>;
@@ -68,6 +69,14 @@ where
             tx_map: BTreeMap::new(),
             tx_removed_keys: BTreeSet::new(),
         }
+    }
+}
+
+impl<K, V> fmt::Debug for StmMap<K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let key_type = any::type_name::<K>();
+        let value_type = any::type_name::<V>();
+        write!(f, "StmMap<{key_type}, {value_type}>({:?})", self.var_id)
     }
 }
 
@@ -172,6 +181,13 @@ where
         self.tx_removed_keys.insert(key);
     }
 
+    pub fn iter(&self) -> Iter<'_, K, V>
+    where
+        K: Clone,
+    {
+        self.into_iter()
+    }
+
     fn read_map(&self) -> Result<ReadLockedVersionedValue<'_, BTreeMap<K, V>>> {
         let map = self.map.read();
         if self.initial_version != map.version {
@@ -244,5 +260,147 @@ where
             map.data.remove(k);
         }
         map.data.append(self.tx_map)
+    }
+}
+
+impl<'a, K, V> IntoIterator for &'a TxMap<K, V>
+where
+    K: Ord + Clone,
+    V: Clone,
+{
+    type IntoIter = Iter<'a, K, V>;
+    type Item = <Self::IntoIter as Iterator>::Item;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Iter {
+            map: self,
+            cursor: Bound::Unbounded,
+        }
+    }
+}
+
+pub struct Iter<'a, K, V> {
+    map: &'a TxMap<K, V>,
+    cursor: Bound<K>,
+}
+
+impl<'a, K, V> Iterator for Iter<'a, K, V>
+where
+    K: Ord + Clone,
+    V: Clone,
+{
+    type Item = Result<(K, V)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let Self {
+            map:
+                TxMap {
+                    tx_map,
+                    tx_removed_keys,
+                    ..
+                },
+            cursor,
+        } = self;
+        let range = (cursor.as_ref(), Bound::Unbounded.as_ref());
+        let map = match self.map.read_map() {
+            Ok(map) => map,
+            Err(err) => return Some(Err(err)),
+        };
+        let map_min_key_val = map
+            .data
+            .range(range)
+            .find(|key_val| !tx_removed_keys.contains(key_val.0));
+        let tx_map_min_key_val = tx_map.range(range).next();
+        let min_key_val = match (map_min_key_val, tx_map_min_key_val) {
+            (Some(map_min_key_val), Some(tx_map_min_key_val)) => {
+                Some(if map_min_key_val.0 < tx_map_min_key_val.0 {
+                    map_min_key_val
+                } else {
+                    drop(map);
+                    tx_map_min_key_val
+                })
+            }
+            (Some(map_min_key_val), None) => Some(map_min_key_val),
+            (None, Some(tx_map_min_key_val)) => {
+                drop(map);
+                Some(tx_map_min_key_val)
+            }
+            (None, None) => None,
+        }
+        .map(owned_key_value);
+        if let Some(ref min_key_val) = min_key_val {
+            *cursor = Bound::Excluded(min_key_val.0.clone())
+        }
+        Ok(min_key_val).transpose()
+    }
+}
+
+fn owned_key_value<K, V>(key_val: (&K, &V)) -> (K, V)
+where
+    K: Clone,
+    V: Clone,
+{
+    let (key, val) = key_val;
+    (key.clone(), val.clone())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn map_operations() {
+        let m = StmMap::from_iter([
+            (30, 303),
+            (20, 202),
+            (10, 101),
+            (40, 404),
+            (50, 505),
+        ]);
+
+        assert!(
+            format!("{m:?}").starts_with("StmMap<i32, i32>(StmVarId(")
+        );
+
+        crate::Tx::run(|tx| {
+            crate::track! {tx, m};
+            assert_eq!(m.first_key()?, Some(Cow::Owned(10)));
+
+            m.remove(30);
+            m.insert(25, 2525);
+            m.insert(10, 8888);
+            m.remove(40);
+            m.insert(30, 9999);
+
+            assert!(m.contains_key(&20)?);
+            assert_eq!(m.get(&20)?, Some(Cow::Owned(202)));
+            assert!(m.contains_key(&10)?);
+            assert_eq!(m.get(&10)?, Some(Cow::Owned(8888)));
+            assert!(!m.contains_key(&40)?);
+            assert_eq!(m.get(&40)?, None);
+            assert_eq!(m.get_mut(&40)?, None);
+
+            assert_eq!(
+                m.iter().collect::<Result<Vec<_>>>()?,
+                vec![(10, 8888), (20, 202), (25, 2525), (30, 9999), (50, 505)]
+            );
+
+            assert!(format!("{m:?}")
+                .starts_with("TxRef<TxMap<i32, i32>>(StmVarId("));
+
+            assert_eq!(m.first_key()?, Some(Cow::Owned(10)));
+            m.remove(10);
+            assert_eq!(m.first_key()?, Some(Cow::Owned(20)));
+            m.remove(20);
+            assert_eq!(m.first_key()?, Some(Cow::Owned(25)));
+            m.remove(30);
+            m.remove(25);
+            assert_eq!(m.first_key()?, Some(Cow::Owned(50)));
+            m.remove(50);
+            assert_eq!(m.first_key()?, None);
+
+            Ok(())
+        })
+        .unwrap()
     }
 }
